@@ -21,6 +21,14 @@ type Event struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// A manual refresh can join a scheduled fetch and receive its actual outcome.
+// Closing done publishes the result and the URL that was fetched to waiters.
+type feedRefresh struct {
+	done  chan struct{}
+	event Event
+	url   string
+}
+
 // Options configures a Crawler.
 type Options struct {
 	Workers int
@@ -37,7 +45,7 @@ type Crawler struct {
 	client   *http.Client
 	opts     Options
 	mu       sync.Mutex
-	active   map[int64]bool
+	active   map[int64]*feedRefresh
 	wake     chan struct{}
 	progress Progress
 	pending  map[int64]bool
@@ -55,7 +63,7 @@ func New(s *store.Store, client *http.Client, opts Options) *Crawler {
 	if client == nil {
 		client = feed.NewClient()
 	}
-	return &Crawler{store: s, client: client, opts: opts, active: map[int64]bool{}, wake: make(chan struct{}, 1), throttle: newHostThrottle(opts.HostGap)}
+	return &Crawler{store: s, client: client, opts: opts, active: map[int64]*feedRefresh{}, wake: make(chan struct{}, 1), throttle: newHostThrottle(opts.HostGap)}
 }
 
 // Run polls until ctx is done.
@@ -142,31 +150,59 @@ func (c *Crawler) RefreshFeed(ctx context.Context, id int64) (Event, error) {
 	if f.Unsubscribed {
 		return Event{}, fmt.Errorf("feed is unsubscribed")
 	}
-	return c.refresh(ctx, *f, true), nil
+	ev := c.refresh(ctx, *f, true)
+	return ev, ctx.Err()
 }
 
 func (c *Crawler) refresh(ctx context.Context, f store.Feed, allowPaused bool) (ev Event) {
-	// A feed can be unsubscribed while it is queued behind another host request.
-	current, err := c.store.GetFeed(f.ID)
-	if err != nil || current.Unsubscribed || (current.Paused && !allowPaused) {
-		return Event{FeedID: f.ID}
-	}
-	f = *current
-	c.mu.Lock()
-	if c.active[f.ID] {
+	ev = Event{FeedID: f.ID}
+	var flight *feedRefresh
+	for {
+		if ctx.Err() != nil {
+			ev.Error = "Refresh cancelled"
+			return ev
+		}
+		// A feed can be unsubscribed while it is queued behind another request.
+		current, err := c.store.GetFeed(f.ID)
+		if err != nil || current.Unsubscribed || (current.Paused && !allowPaused) {
+			return ev
+		}
+		f = *current
+		c.mu.Lock()
+		active := c.active[f.ID]
+		if active == nil {
+			flight = &feedRefresh{done: make(chan struct{}), url: f.URL}
+			c.active[f.ID] = flight
+			c.mu.Unlock()
+			break
+		}
 		c.mu.Unlock()
-		return Event{FeedID: f.ID}
+		if !allowPaused {
+			return ev // Scheduled polling leaves the existing fetch in charge.
+		}
+		select {
+		case <-ctx.Done():
+			ev.Error = "Refresh cancelled"
+			return ev
+		case <-active.done:
+			// If the URL was edited during the fetch, refresh the new source
+			// instead of reporting the old source's result as its status.
+			current, err := c.store.GetFeed(f.ID)
+			if err == nil && current.URL != active.url {
+				continue
+			}
+			return active.event
+		}
 	}
-	c.active[f.ID] = true
-	c.mu.Unlock()
 	defer func() {
 		c.complete(ev)
 		c.mu.Lock()
+		flight.event = ev
 		delete(c.active, f.ID)
+		close(flight.done)
 		c.mu.Unlock()
 	}()
 
-	ev = Event{FeedID: f.ID}
 	// Wait for the host slot with the outer context so a long hold does not
 	// eat into the per-fetch timeout; a deferred feed stays due for next tick.
 	release, ok := c.throttle.acquire(ctx, f.URL)
@@ -174,12 +210,13 @@ func (c *Crawler) refresh(ctx context.Context, f store.Feed, allowPaused bool) (
 		ev.Error = "Refresh cancelled"
 		return ev
 	}
-	current, err = c.store.GetFeed(f.ID)
+	current, err := c.store.GetFeed(f.ID)
 	if err != nil || current.Unsubscribed || (current.Paused && !allowPaused) {
 		release()
 		return ev
 	}
 	f = *current
+	flight.url = f.URL
 	fctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	now := time.Now().UTC()
