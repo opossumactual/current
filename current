@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Resolve symlinks so a personal bin/current link works on both systems.
+CURRENT_SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$CURRENT_SCRIPT" ]]; do
+  CURRENT_PARENT="$(cd -P -- "$(dirname -- "$CURRENT_SCRIPT")" && pwd)"
+  CURRENT_SCRIPT="$(readlink "$CURRENT_SCRIPT")"
+  [[ "$CURRENT_SCRIPT" = /* ]] || CURRENT_SCRIPT="$CURRENT_PARENT/$CURRENT_SCRIPT"
+done
+CURRENT_ROOT="$(cd -P -- "$(dirname -- "$CURRENT_SCRIPT")" && pwd)"
+if ! command -v python3 >/dev/null 2>&1; then
+  printf 'Current needs Python 3. On macOS: brew install python\n' >&2
+  exit 1
+fi
+exec python3 "$CURRENT_ROOT/scripts/launcher.py" "$@"

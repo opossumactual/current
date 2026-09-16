@@ -1,0 +1,23 @@
+data/
+web/node_modules
+web/.svelte-kit/
+web/build/
+tui/target/
+bin/
+*.log
+screenshots/
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+*.opml
+*.zip
+
+# Local Python, macOS, and release artifacts
+__pycache__/
+*.pyc
+.DS_Store
+dist/
+*.tar.gz

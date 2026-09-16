@@ -1,0 +1,50 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: |
+          npm install --global pnpm@10
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - name: Build from a fresh checkout
+        run: ./scripts/setup.sh
+      - name: Check and test
+        run: |
+          pnpm --dir web check
+          go vet ./...
+          go test -race ./...
+          cargo fmt --check --manifest-path tui/Cargo.toml
+          cargo test --locked --manifest-path tui/Cargo.toml
+          python3 scripts/test_launcher.py
+      - name: Install browser test runtime
+        run: pnpm --dir web exec playwright install --with-deps chromium
+      - name: Browser and terminal integration
+        run: pnpm --dir web test:integration
