@@ -199,7 +199,8 @@ class Launcher:
                 raise RuntimeError("Kitty is not installed. Install it, or use ./current tui in this terminal.")
             self.start()
             env.pop("NO_COLOR", None)
-            os.execvpe(kitty, [kitty, "--title", "Current · Terminal", "--override", "background_opacity=1", str(self.terminal), *args], env)
+            window_class = ["--class", "current"] if sys.platform.startswith("linux") else []
+            os.execvpe(kitty, [kitty, *window_class, "--title", "Current · Terminal", "--override", "background_opacity=1", str(self.terminal), *args], env)
         self.start()
         os.execve(self.terminal, [str(self.terminal), *args], env)
 
